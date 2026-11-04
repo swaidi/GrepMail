@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds grepmail_2.1.0_amd64.deb on Debian/Ubuntu. Run from the project folder.
+# Builds grepmail_2.2.0_amd64.deb on Debian/Ubuntu. Run from the project folder.
 set -euo pipefail
-VER=2.1.0
+VER=2.2.0
 sudo apt-get install -y python3-venv python3-tk clamav binutils
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt pyinstaller
 pyinstaller --noconfirm --windowed --name GrepMail --icon packaging/grepmail.png \
-  --hidden-import gm_platform --hidden-import gm_security --hidden-import gm_mail --hidden-import gm_update --hidden-import PIL._tkinter_finder \
+  --hidden-import gm_platform --hidden-import gm_security --hidden-import gm_mail --hidden-import gm_update --hidden-import gm_import --hidden-import PIL._tkinter_finder \
   --collect-all ttkbootstrap --collect-all oletools grepmail.py
 PKG=build/grepmail_${VER}_amd64
 rm -rf "$PKG" && mkdir -p "$PKG/DEBIAN" "$PKG/opt" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/256x256/apps"

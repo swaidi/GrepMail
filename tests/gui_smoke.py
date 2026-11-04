@@ -35,7 +35,7 @@ def script():
         if w.winfo_class() == "Toplevel":
             w.destroy()
     # ---- 1. creating over an existing file -> conflict, retry after removing it
-    target = os.path.join(tmp, "GrepMail.xlsx")
+    target = os.path.join(tmp, "GrepMail.db")
     open(target, "wb").write(b"not a database")
     answers = iter(["retry", "retry"])
     seen = []
@@ -51,7 +51,8 @@ def script():
     assert app._create_database_flow() is True
     assert len(seen) == 2 and "already exists" in seen[0][1], seen
     assert g.inspect_database(target) == "valid" and app.db is not None
-    assert g.SHEET_CUSTOM in openpyxl.load_workbook(target).sheetnames
+    app.db.export_view()
+    assert g.SHEET_CUSTOM in openpyxl.load_workbook(app.db.view_path).sheetnames
     print("conflict flow ok")
 
     # ---- 2. old-format file opened -> conflict message mentions format
@@ -84,9 +85,54 @@ def script():
     app.scope_var.set(g.SCOPE_INBOX); app._scope_changed()
     assert app.outlook_folder_var.get() == g.INBOX_TOKEN
     app.update(); shot("g_tenders_inbox_only")
+    # ---- 4. File > Import References and Keywords (headerless workbook)
+    src = os.path.join(tmp, "teamfile.xlsx")
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Tenders"
+    ws.append(["MEP055", os.path.join(tmp, "p55")]); ws.append(["PRJ-001", os.path.join(tmp, "save2")])
+    ws.append(["X-9", ""])
+    kw = wb.create_sheet("Keywords"); kw.append(["offer"]); kw.append(["pricing"]); kw.append(["عرض"])
+    wb.save(src)
+    filedialog.askopenfilename = lambda **k: src
+    app._import_flow(); app.update()
+    dlg = [w for w in app.winfo_children() if w.winfo_class() == "Toplevel"][-1]
+
+    def find(widget, cls, text=None):
+        for c in widget.winfo_children():
+            if c.winfo_class() == cls and (text is None or str(c.cget("text")) == text):
+                return c
+            r = find(c, cls, text)
+            if r is not None:
+                return r
+        return None
+    import tkinter as tk
+    texts = []
+    def all_widgets(w):
+        for c in w.winfo_children():
+            yield c
+            yield from all_widgets(c)
+    for lbl in [x for x in all_widgets(dlg) if x.winfo_class() == "TLabel"]:
+        var = str(lbl.cget("textvariable"))
+        texts.append(app.getvar(var) if var else str(lbl.cget("text")))
+    assert any("Will import: 2 reference(s), 2 new keyword(s)" in x and "Skipped: 1 row(s)" in x for x in texts), texts
+    shot("g_import_preview")
+    find(dlg, "TButton", "Import").invoke(); app.update()
+    refs = {r[0]: r for r in app.db.list_tenders()}
+    assert set(refs) == {"PRJ-001", "MEP055"} and refs["MEP055"][2] == g.INBOX_TOKEN, refs
+    assert refs["PRJ-001"][1] == os.path.join(tmp, "save2")        # existing reference updated
+    assert app.db.keyword_list_lower() == ["offer", "pricing", "عرض"], app.db.keyword_list_lower()
+    print("import flow ok")
     app.destroy()
     print("GUI SMOKE PASSED")
 
 
-app.after(500, script)
+def guarded():
+    try:
+        script()
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        os._exit(1)
+
+
+app.after(500, guarded)
 app.mainloop()

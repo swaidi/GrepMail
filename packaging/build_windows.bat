@@ -4,7 +4,7 @@ python -m venv .venv
 call .venv\Scripts\activate
 pip install -r requirements.txt pyinstaller
 pyinstaller --noconfirm --windowed --name GrepMail --icon grepmail.ico ^
-  --hidden-import win32timezone --hidden-import gm_platform --hidden-import gm_security --hidden-import gm_mail --hidden-import gm_update --hidden-import PIL._tkinter_finder ^
+  --hidden-import win32timezone --hidden-import gm_platform --hidden-import gm_security --hidden-import gm_mail --hidden-import gm_update --hidden-import gm_import --hidden-import PIL._tkinter_finder ^
   --collect-all ttkbootstrap --collect-all oletools ^
   grepmail.py
 if errorlevel 1 goto failed

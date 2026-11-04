@@ -49,5 +49,10 @@ GrepMail checks the latest GitHub release once a day (Settings > Startup turns i
 1. Raise `APP_VERSION` in `grepmail.py` and `AppVersion` in `packaging/grepmail.iss`.
 2. Build the installer (and the .deb), then run `gh release create vX.Y.Z <files> --title ... --notes ...`. The release notes are what users see in the update dialog.
 
+## Importing references and keywords
+
+**File > Import References and Keywords...** copies the Reference and Keyword lists (and exclusion words, when present) from another file into the open database. A preview shows what will be added or updated before anything is written; the source file is never changed.
+Supported files: Excel (`.xlsx`, `.xlsm`) with or without a header row, CSV, and another `GrepMail.db`. Without a header row, columns are read as Reference, Local Path, Mail Folder, Deadline. A reference with no mail folder is imported as *Inbox Only*. `tools/import_data.py` offers the same import from the command line.
+
 ## License
 GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See the `LICENSE` file.

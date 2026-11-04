@@ -72,6 +72,7 @@ import gm_platform
 import gm_security
 import gm_mail
 import gm_update
+import gm_import
 
 try:  # pywin32 needs this module when it converts Outlook dates
     import win32timezone  # noqa: F401
@@ -82,7 +83,7 @@ except Exception:
 # CONSTANTS
 # =========================================================
 APP_TITLE = "GrepMail"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 INBOX_TOKEN = "(Inbox)"   # stored as the Mail Folder when only the Inbox is read
 
 SHEET_TENDERS = "References"
@@ -192,6 +193,32 @@ def parse_date(v):
         except ValueError:
             continue
     return None
+
+
+def plan_reference_import(row):
+    """How one imported reference will be stored: (reference, path, folder, deadline, scope, error).
+    A reference without a mail folder (older files had none) is stored as 'Inbox Only'."""
+    ref = s(row.get("Reference"))
+    path = s(row.get("LocalPath"))
+    folder = s(row.get("MailFolder")).strip("\\")
+    scope = s(row.get("Scope"))
+    deadline = date_str(row.get("Deadline"))
+    if not folder or folder == INBOX_TOKEN:
+        scope, folder = SCOPE_INBOX, INBOX_TOKEN
+    elif scope not in SCOPES:
+        scope = SCOPE_SUB
+    error = ""
+    if not ref:
+        error = "No reference"
+    elif not path:
+        error = "No local path"
+    elif deadline:
+        d = parse_date(deadline)
+        if d is None:
+            error = "Bad deadline"
+        else:
+            deadline = d.isoformat()
+    return ref, path, folder, deadline, scope, error
 
 
 def parse_ts(v):
@@ -748,11 +775,17 @@ class GrepDB:
         return len(ids)
 
     # ---------- Excel view ----------
-    def request_export(self, delay=None):
-        """Schedules a refresh of the Excel view file (several changes share one refresh)."""
+    def request_export(self, delay=None, force=False):
+        """Schedules a refresh of the Excel view file (several changes share one refresh).
+        force=True replaces a waiting refresh with this (sooner) one."""
         with self.lock:
-            if self._closed or self._export_timer is not None:
+            if self._closed:
                 return
+            if self._export_timer is not None:
+                if not force:
+                    return
+                self._export_timer.cancel()
+                self._export_timer = None
             t = threading.Timer(self.EXPORT_DELAY if delay is None else delay, self._export_job)
             t.daemon = True
             self._export_timer = t
@@ -2141,6 +2174,8 @@ class App(tb.Window):
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="New Database...", command=self._create_database_flow)
         filemenu.add_command(label="Open Database...", command=self._open_existing_flow)
+        filemenu.add_command(label="Import References and Keywords...", command=self._import_flow)
+        filemenu.add_separator()
         filemenu.add_command(label="Export to Excel Now", command=self._export_excel_now)
         filemenu.add_command(label="Open Excel View", command=self._open_excel_view)
         filemenu.add_separator()
@@ -2487,6 +2522,183 @@ class App(tb.Window):
         x = self.winfo_rootx() + max(0, (self.winfo_width() - win.winfo_width()) // 2)
         y = self.winfo_rooty() + max(0, (self.winfo_height() - win.winfo_height()) // 3)
         win.geometry("+%d+%d" % (x, y))
+
+    # ---------- import references and keywords ----------
+    def _import_flow(self):
+        if not self._need_db():
+            return
+        path = filedialog.askopenfilename(
+            title="Choose the file to import from",
+            filetypes=[("Excel, CSV or GrepMail database", "*.xlsx *.xlsm *.csv *.db"),
+                       ("Excel workbook", "*.xlsx *.xlsm"), ("CSV file", "*.csv"),
+                       ("GrepMail database", "*.db"), ("All files", "*.*")])
+        if not path:
+            return
+        if os.path.abspath(path) == os.path.abspath(self.db.path) or \
+                os.path.abspath(path) == os.path.abspath(self.db.view_path):
+            messagebox.showwarning("Import", "Choose a file other than the current database "
+                                   "or its Excel view.")
+            return
+        csv_kind = gm_import.guess_csv_kind(path) if path.lower().endswith(".csv") else None
+        try:
+            data = gm_import.read_source(path, csv_kind)
+        except gm_import.ImportError_ as e:
+            messagebox.showwarning("Import", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Import", "The file could not be read:\n%s" % e)
+            return
+        self._import_preview(path, data, csv_kind)
+
+    def _import_preview(self, path, data, csv_kind):
+        win = tb.Toplevel(self)
+        win.title("Import References and Keywords")
+        win.transient(self)
+        win.geometry("860x560")
+        frm = ttk.Frame(win, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Check what will be imported", font=FONT_BOLD).pack(anchor="w")
+        ttk.Label(frm, text=path, wraplength=820).pack(anchor="w", pady=(2, 8))
+        state = {"data": data}
+        kind_var = tk.StringVar(value=csv_kind or "")
+        if csv_kind:
+            kb = ttk.Frame(frm)
+            kb.pack(anchor="w", pady=(0, 6))
+            ttk.Label(kb, text="This CSV file contains:").pack(side="left", padx=(0, 10))
+
+            def reread():
+                try:
+                    state["data"] = gm_import.read_source(path, kind_var.get())
+                except Exception as e:
+                    messagebox.showwarning("Import", str(e), parent=win)
+                    return
+                fill()
+            for val, label in (("references", "References"), ("keywords", "Keywords")):
+                ttk.Radiobutton(kb, text=label, value=val, variable=kind_var, command=reread).pack(side="left", padx=(0, 10))
+        footer = ttk.Frame(frm)
+        footer.pack(side="bottom", fill="x")          # packed first so it is never pushed out of view
+        nb = ttk.Notebook(frm)
+        nb.pack(fill="both", expand=True)
+        trees = {}
+
+        def make_tab(key, title, cols, widths):
+            holder = ttk.Frame(nb)
+            tree = ttk.Treeview(holder, columns=cols, show="headings", height=8)
+            for c, w in zip(cols, widths):
+                tree.heading(c, text=c)
+                tree.column(c, width=w, anchor="w")
+            sb = ttk.Scrollbar(holder, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            tree.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            nb.add(holder, text=title)
+            trees[key] = (tree, holder, title)
+        make_tab("references", "References", ("Reference", "Local Path", "Mail Folder", "Deadline", "Action"),
+                 (95, 290, 120, 85, 240))
+        make_tab("keywords", "Keywords", ("Keyword", "Action"), (400, 200))
+        make_tab("exclusions", "Exclusion words", ("Word", "Action"), (400, 200))
+        note = ttk.Label(footer, text="References without a mail folder are imported as Inbox Only; "
+                                   "change this later in Tender References. Existing references with "
+                                   "the same name are updated. The source file is not changed.",
+                         wraplength=820, justify="left")
+        note.pack(anchor="w", pady=(8, 0))
+        summary = tk.StringVar()
+        ttk.Label(footer, textvariable=summary, font=FONT_BOLD).pack(anchor="w", pady=(6, 0))
+        incl_excl = tk.BooleanVar(value=True)
+        excl_chk = ttk.Checkbutton(footer, text="Also import the exclusion words", variable=incl_excl)
+        win._keep_alive = (summary, kind_var, incl_excl)      # Tk variables vanish if Python frees them
+        plan = {}
+
+        def fill():
+            d = state["data"]
+            have_refs = {ref.upper() for ref, *_ in self.db.list_tenders()}
+            have_kws = set(self.db.keyword_list_lower())
+            have_excl = set(self.db.exclusion_list_lower())
+            for key in trees:
+                tree, _, _ = trees[key]
+                tree.delete(*tree.get_children())
+            plan["refs"], plan["kws"], plan["excl"] = [], [], []
+            n_skip = 0
+            for r in d["references"]:
+                ref, lp, folder, deadline, scope, err = plan_reference_import(r)
+                if err:
+                    action, n_skip = "Skipped: " + err, n_skip + 1
+                else:
+                    action = "Update" if ref.upper() in have_refs else "New"
+                    if not os.path.isdir(lp):
+                        action += " (path not found here)"
+                    plan["refs"].append((ref, lp, folder, deadline, scope))
+                trees["references"][0].insert("", "end", values=(
+                    ref, lp, "(Inbox only)" if scope == SCOPE_INBOX else folder, deadline, action))
+            for k in d["keywords"]:
+                new = k.lower() not in have_kws
+                trees["keywords"][0].insert("", "end", values=(k, "New" if new else "Already exists"))
+                if new:
+                    plan["kws"].append(k)
+            for w in d["exclusions"]:
+                new = w.lower() not in have_excl
+                trees["exclusions"][0].insert("", "end", values=(w, "New" if new else "Already exists"))
+                if new:
+                    plan["excl"].append(w)
+            for key, count in (("references", len(d["references"])), ("keywords", len(d["keywords"])),
+                               ("exclusions", len(d["exclusions"]))):
+                nb.tab(trees[key][1], text="%s (%d)" % (trees[key][2], count),
+                       state="normal" if count or key != "exclusions" else "hidden")
+            if d["exclusions"]:
+                excl_chk.pack(anchor="w")
+            else:
+                excl_chk.pack_forget()
+            summary.set("Will import: %d reference(s), %d new keyword(s)%s.%s" % (
+                len(plan["refs"]), len(plan["kws"]),
+                ", %d new exclusion word(s)" % len(plan["excl"]) if d["exclusions"] else "",
+                "   Skipped: %d row(s)." % n_skip if n_skip else ""))
+            go_btn.config(state="normal" if (plan["refs"] or plan["kws"] or plan["excl"]) else "disabled")
+
+        def do_import():
+            added_r = added_k = added_e = 0
+            problems = []
+            for ref, lp, folder, deadline, scope in plan["refs"]:
+                try:
+                    self.db.add_or_update_tender(ref, lp, folder, deadline, scope)
+                    added_r += 1
+                except Exception as e:
+                    problems.append("%s: %s" % (ref, e))
+            for k in plan["kws"]:
+                try:
+                    self.db.add_keyword(k)
+                    added_k += 1
+                except Exception as e:
+                    problems.append("%s: %s" % (k, e))
+            if incl_excl.get():
+                for w in plan["excl"]:
+                    try:
+                        self.db.add_exclusion(w)
+                        added_e += 1
+                    except Exception as e:
+                        problems.append("%s: %s" % (w, e))
+            win.destroy()
+            self._refresh_all()
+            self.db.request_export(1.0, force=True)        # show the import in the Excel view at once
+            msg = "%d reference(s) and %d keyword(s) imported" % (added_r, added_k)
+            if added_e:
+                msg += ", %d exclusion word(s)" % added_e
+            self._log_line("Import: " + msg + " from " + os.path.basename(path))
+            if problems:
+                messagebox.showwarning("Import", msg + ".\n\nNot imported:\n" + "\n".join(problems[:10]))
+            else:
+                self._show_toast("Import completed", msg + ".")
+
+        bar = ttk.Frame(footer)
+        bar.pack(anchor="e", pady=(10, 0))
+        go_btn = ttk.Button(bar, text="Import", bootstyle="primary", command=do_import)
+        go_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(bar, text="Cancel", bootstyle="secondary-outline", command=win.destroy).pack(side="left")
+        fill()
+        win.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - win.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - win.winfo_height()) // 4)
+        win.geometry("+%d+%d" % (x, y))
+        win.grab_set()
 
     def _need_db(self):
         if not self.db:

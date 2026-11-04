@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GrepMail
+Comment=Saves tender attachments from your mailbox into reference folders
+Exec=/opt/grepmail/GrepMail
+Icon=grepmail
+Terminal=false
+Categories=Office;Email;

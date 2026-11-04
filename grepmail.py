@@ -82,7 +82,7 @@ except Exception:
 # CONSTANTS
 # =========================================================
 APP_TITLE = "GrepMail"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 INBOX_TOKEN = "(Inbox)"   # stored as the Mail Folder when only the Inbox is read
 
 SHEET_TENDERS = "References"

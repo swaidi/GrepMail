@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds grepmail_2.0.0_amd64.deb on Debian/Ubuntu. Run from the project folder.
 set -euo pipefail
-VER=2.0.0
+VER=2.0.1
 sudo apt-get install -y python3-venv python3-tk clamav binutils
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt pyinstaller

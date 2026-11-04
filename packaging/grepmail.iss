@@ -1,7 +1,7 @@
 ; Inno Setup script for GrepMail (Windows, per-user install, no administrator rights needed)
 ; Build the program first:  see packaging\build_windows.bat  (creates dist\GrepMail\)
 #define AppName "GrepMail"
-#define AppVersion "2.0.0"
+#define AppVersion "2.0.1"
 
 [Setup]
 AppId={{6B0F3E1A-5D1C-4E8B-9A57-0A1B2C3D4E5F}

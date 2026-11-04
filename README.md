@@ -39,7 +39,15 @@ Macro-enabled files: Allow, Allow and Flag, or Block; suspicious macros are quar
 ## Tests
     python tests/test_core.py
     python tests/test_imap.py
+    python tests/test_update.py
     xvfb-run -a python tests/gui_smoke.py   # Linux, window test
 
-## Not yet included
-Update checker (waiting for the GitHub repository).
+## Updates
+GrepMail checks the latest GitHub release once a day (Settings > Startup turns it off; Help > Check for Updates checks now). It shows the release notes and offers Update Now, Remind Me Later or Skip This Version. The installer is downloaded only from GitHub over HTTPS and its SHA-256 checksum is verified.
+
+### Publishing a new version
+1. Raise `APP_VERSION` in `grepmail.py` and `AppVersion` in `packaging/grepmail.iss`.
+2. Build the installer (and the .deb), then run `gh release create vX.Y.Z <files> --title ... --notes ...`. The release notes are what users see in the update dialog.
+
+## License
+GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later). See the `LICENSE` file.

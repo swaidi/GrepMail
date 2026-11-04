@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 GrepMail  (v2.0)
 ================
@@ -70,6 +71,7 @@ except ImportError:
 import gm_platform
 import gm_security
 import gm_mail
+import gm_update
 
 try:  # pywin32 needs this module when it converts Outlook dates
     import win32timezone  # noqa: F401
@@ -455,6 +457,9 @@ class Config:
         self.macro_mode = "flag"        # allow | flag | block
         self.mark_web = True
         self.auto_monitor = False
+        self.check_updates = True
+        self.skipped_version = ""
+        self.update_snooze_until = ""     # ISO time; no automatic prompt before it
         self.last_check = {"inbox": None, "sent": None}
         self.session_password = ""      # only kept in memory
         self._load()
@@ -462,7 +467,7 @@ class Config:
     _SIMPLE = ("db_path", "poll_seconds", "warn_days", "hint_regex", "hint_phrases", "toasts",
                "scan_root", "theme", "provider", "imap", "name_separator", "file_format",
                "custom_fields", "custom_filter", "scan_enabled", "require_scan", "macro_mode",
-               "mark_web", "auto_monitor")
+               "mark_web", "auto_monitor", "check_updates", "skipped_version", "update_snooze_until")
 
     def _load(self):
         d = None
@@ -2095,6 +2100,10 @@ class App(tb.Window):
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
+        helpmenu = tk.Menu(menubar, tearoff=0)
+        helpmenu.add_command(label="Check for Updates...", command=lambda: self._check_updates(manual=True))
+        helpmenu.add_command(label="About GrepMail", command=self._about)
+        menubar.add_cascade(label="Help", menu=helpmenu)
         self.config(menu=menubar)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2305,8 +2314,133 @@ class App(tb.Window):
         except Exception:
             pass
         self._build_custom_table()
+        if self.cfg.check_updates and not getattr(self, "_update_checked", False):
+            self._update_checked = True
+            self.after(5000, lambda: self._check_updates(manual=False))
         if self.cfg.auto_monitor and not (self.monitor and self.monitor.is_alive()):
             self.after(1500, self._start_monitor)
+
+    # ----- updates -----
+    def _about(self):
+        messagebox.showinfo("About GrepMail", "GrepMail %s\n\nSaves tender attachments from your mailbox "
+                            "into one folder per reference.\nLicense: AGPL-3.0-or-later\n"
+                            "https://github.com/%s" % (APP_VERSION, gm_update.REPO))
+
+    def _check_updates(self, manual=False):
+        """Looks for a newer release in the background. An automatic check stays silent unless
+        there is something new that was not skipped or postponed."""
+        if not manual:
+            if not self.cfg.check_updates:
+                return
+            if self.cfg.update_snooze_until:
+                try:
+                    if dt.datetime.now() < dt.datetime.fromisoformat(self.cfg.update_snooze_until):
+                        return
+                except ValueError:
+                    pass
+
+        def work():
+            try:
+                info = gm_update.check_latest(APP_VERSION)
+                err = ""
+            except Exception as e:
+                info, err = None, str(e)
+            self.after(0, lambda: self._update_result(info, err, manual))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_result(self, info, err, manual):
+        if err:
+            if manual:
+                messagebox.showwarning("Check for Updates", "Could not check for updates:\n%s\n\n"
+                                       "You can also look at https://github.com/%s/releases" % (err, gm_update.REPO))
+            return
+        if not info:
+            if manual:
+                messagebox.showinfo("Check for Updates", "GrepMail %s is the latest version." % APP_VERSION)
+            return
+        if not manual and info["version"] == self.cfg.skipped_version:
+            return
+        self._update_dialog(info)
+
+    def _update_dialog(self, info):
+        win = tb.Toplevel(self)
+        win.title("Update available")
+        win.transient(self)
+        frm = ttk.Frame(win, padding=18)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="GrepMail %s is available (you have %s)." % (info["version"], APP_VERSION),
+                  font=FONT_BOLD).pack(anchor="w")
+        ttk.Label(frm, text="What is new:").pack(anchor="w", pady=(10, 4))
+        box = tk.Text(frm, width=70, height=12, wrap="word", relief="solid", bd=1)
+        box.insert("1.0", info["notes"] or "No release notes were provided.")
+        box.config(state="disabled")
+        box.pack(fill="both", expand=True)
+        status = ttk.Label(frm, text="" if info["asset"] else
+                           "No installer for this system is attached to the release. Use the releases page.")
+        status.pack(anchor="w", pady=(8, 0))
+        bar = ttk.Frame(frm)
+        bar.pack(anchor="e", pady=(12, 0))
+
+        def later():
+            self.cfg.update_snooze_until = (dt.datetime.now() + dt.timedelta(days=1)).isoformat()
+            self.cfg.save()
+            win.destroy()
+
+        def skip():
+            self.cfg.skipped_version = info["version"]
+            self.cfg.save()
+            win.destroy()
+
+        def go():
+            if not info["asset"]:
+                gm_platform.open_path(info["page"])
+                return
+            now_btn.config(state="disabled")
+            status.config(text="Downloading...")
+            cancel = threading.Event()
+            win.protocol("WM_DELETE_WINDOW", lambda: (cancel.set(), win.destroy()))
+
+            def progress(done, total):
+                if total:
+                    self.after(0, lambda: status.winfo_exists() and status.config(
+                        text="Downloading... %d%%" % (100 * done // total)))
+
+            def work():
+                try:
+                    path = gm_update.download(info["asset"], progress=progress,
+                                              app_version=APP_VERSION, cancel=cancel)
+                    self.after(0, lambda: finish(path, ""))
+                except Exception as e:
+                    self.after(0, lambda: finish("", str(e)))
+            threading.Thread(target=work, daemon=True).start()
+
+        def finish(path, err):
+            if not win.winfo_exists():
+                return
+            if err:
+                status.config(text="The update failed: %s" % err)
+                now_btn.config(state="normal")
+                return
+            win.destroy()
+            if sys.platform.startswith("win"):
+                if messagebox.askyesno("Install update", "The update was downloaded and checked.\n\n"
+                                       "GrepMail will close and start the installer. Continue?"):
+                    gm_platform.open_path(path)
+                    self._on_close()
+            else:
+                messagebox.showinfo("Install update", "The update was downloaded to:\n%s\n\n"
+                                    "To install it, open a terminal and run:\n"
+                                    "sudo apt install \"%s\"" % (path, path))
+                gm_platform.open_path(os.path.dirname(path))
+        now_btn = ttk.Button(bar, text="Update Now", bootstyle="primary", command=go)
+        now_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(bar, text="Remind Me Later", bootstyle="secondary-outline", command=later).pack(side="left", padx=(0, 8))
+        ttk.Button(bar, text="Skip This Version", bootstyle="secondary-outline", command=skip).pack(side="left")
+        win.protocol("WM_DELETE_WINDOW", later)
+        win.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - win.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - win.winfo_height()) // 3)
+        win.geometry("+%d+%d" % (x, y))
 
     def _need_db(self):
         if not self.db:
@@ -2567,6 +2701,7 @@ class App(tb.Window):
         self.set_pass = tk.StringVar(value="")
         self.set_autostart = tk.BooleanVar(value=gm_platform.autostart_enabled())
         self.set_automon = tk.BooleanVar(value=c.auto_monitor)
+        self.set_updates = tk.BooleanVar(value=c.check_updates)
         self.set_scan = tk.BooleanVar(value=c.scan_enabled)
         self.set_require = tk.BooleanVar(value=c.require_scan)
         self.set_macro = tk.StringVar(value={"allow": "Allow", "flag": "Allow and Flag",
@@ -2664,12 +2799,14 @@ class App(tb.Window):
         # --- Startup
         f = tab("Startup")
         for r, (text, var) in enumerate((("Start GrepMail when I sign in", self.set_autostart),
-                                         ("Start monitoring automatically", self.set_automon))):
+                                         ("Start monitoring automatically", self.set_automon),
+                                         ("Check for updates automatically", self.set_updates))):
             self._label(f, text).grid(row=r, column=0, sticky="w", pady=6)
             ttk.Checkbutton(f, variable=var, bootstyle="round-toggle").grid(row=r, column=1, sticky="w")
         note(f, "Starting with the system affects only your own user account and can be turned off here "
                 "at any time. \"Start monitoring automatically\" begins watching your mail as soon as "
-                "the app opens.", 2)
+                "the app opens. The update check contacts GitHub once a day and sends only the program "
+                "name and version.", 3)
 
         # --- Security
         f = tab("Security")
@@ -3478,6 +3615,7 @@ class App(tb.Window):
             messagebox.showwarning("Start with system", "Could not change the start-up setting:\n%s" % msg)
             self.set_autostart.set(gm_platform.autostart_enabled())
         c.auto_monitor = self.set_automon.get()
+        c.check_updates = self.set_updates.get()
         # security
         c.scan_enabled = self.set_scan.get()
         c.require_scan = self.set_require.get()

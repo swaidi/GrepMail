@@ -1,5 +1,6 @@
 """Core behavior tests (no Outlook, no real mail server). Run: python tests/test_core.py"""
 import os
+import json
 import sys
 import shutil
 import tempfile
@@ -88,7 +89,8 @@ def results(db):
 # ---------------- tests ----------------
 def test_helpers():
     assert g.extract_name("RE: FW: ABC Co - PRJ-001 Quote") == "ABC Co"
-    assert g.extract_name("ABC Co || PRJ-001", " - ") == "ABC Co"
+    assert g.extract_name("RE: FW: ABC Co - PRJ-001 Quote", ["-"], "PRJ-001") == "ABC Co"
+    assert g.extract_name("ABC Co || PRJ-001", ["||"]) == "ABC Co"
     assert g.extract_name("ABC Co ## PRJ-001", " ## ") == "ABC Co"
     assert g.build_file_name("{Sender} {Attachment Name}", "ABC", "PRJ-001", "2026-11-03", "Q.pdf") == "ABC Q.pdf"
     assert g.build_file_name("{Date} {Reference} {Sender}", "ABC", "PRJ-001", "2026-11-03", "Q.pdf") == "2026-11-03 PRJ-001 ABC.pdf"
@@ -191,8 +193,47 @@ def test_require_scan_without_scanner():
     print("scanner availability ok")
 
 
+def test_separators():
+    x = g.extract_name
+    # spaces around the separator are ignored, the reference may contain a hyphen
+    for subj in ("ABC Co - PRJ-001 Q", "ABC Co-PRJ-001 Q", "ABC Co  -  PRJ-001 Q", "ABC Co -PRJ-001 Q"):
+        assert x(subj, ["-"], "PRJ-001") == "ABC Co", subj
+    # a hyphen inside the company name is kept when the reference is known
+    assert x("Al-Habib Co - PRJ-001 Q", ["-"], "PRJ-001") == "Al-Habib Co"
+    # other separators only when enabled
+    assert x("ABC Co||PRJ-001", ["-", "||"], "PRJ-001") == "ABC Co"
+    assert x("ABC Co / PRJ-001", ["/"], "PRJ-001") == "ABC Co"
+    assert x("ABC Co | PRJ-001", ["|", "||"], "PRJ-001") == "ABC Co"
+    assert x("ABC Co ## PRJ-001", ["-", "##"], "PRJ-001") == "ABC Co"
+    # no known reference: first enabled separator
+    assert x("ABC Co || Offer", ["||"]) == "ABC Co"
+    assert x("ABC Co _ Offer", ["-", "_"]) == "ABC Co"
+    assert x("ABC Co Offer", ["-"]) == "ABC Co Offer"
+    # case-insensitive reference
+    assert x("ABC Co - prj-001 Q", ["-"], "PRJ-001") == "ABC Co"
+    assert g.normalize_separators([" || ", "|", "", "|"]) == ["||", "|"]
+    c = g.Config()
+    c.separators, c.custom_separator = ["-", "/"], " ## "
+    assert c.active_separators() == ["##", "-", "/"]
+    print("separators ok")
+
+
+def test_old_separator_setting_upgraded():
+    d = tempfile.mkdtemp(dir=TMP)
+    path = os.path.join(d, "c.json")
+    for old, seps, custom in ((" || ", ["||"], ""), (" - ", ["-"], ""), (" ## ", [], "##")):
+        json.dump({"name_separator": old}, open(path, "w"))
+        saved, g.CONFIG_FILE = g.CONFIG_FILE, path
+        try:
+            c = g.Config()
+        finally:
+            g.CONFIG_FILE = saved
+        assert c.separators == (seps or ["-"]) and c.custom_separator == custom, (old, c.separators)
+    print("old separator upgrade ok")
+
+
 def test_file_format_setting():
-    db, cfg, proc, save, _ = make_env(file_format="{Date} {Reference} {Sender} {Attachment Name}", name_separator=" || ")
+    db, cfg, proc, save, _ = make_env(file_format="{Date} {Reference} {Sender} {Attachment Name}", separators=["-", "||"])
     run(proc, db, Mail("ABC Co || PRJ-001 offer", "offer", [Att("q.pdf")], eid="F1"))
     assert os.listdir(save) == ["2026-11-03 PRJ-001 ABC Co q.pdf"], os.listdir(save)
     print("file format ok")

@@ -82,7 +82,7 @@ except Exception:
 # CONSTANTS
 # =========================================================
 APP_TITLE = "GrepMail"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 INBOX_TOKEN = "(Inbox)"   # stored as the Mail Folder when only the Inbox is read
 
 SHEET_TENDERS = "References"
@@ -151,7 +151,10 @@ if getattr(sys, "frozen", False):
     CONFIG_FILE = os.path.join(gm_platform.config_dir(), "grepmail_config.json")
 else:  # running from source: keep the settings next to the script
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grepmail_config.json")
-DEFAULT_NAME_SEPARATOR = " - "
+DEFAULT_SEPARATORS = ["-"]
+# Separators offered in Settings > Subject Rules (label, text). A custom one can be added too.
+SEPARATOR_CHOICES = [("Dash  -", "-"), ("Long dash  –", "–"), ("Double bar  ||", "||"),
+                     ("Bar  |", "|"), ("Slash  /", "/"), ("Underscore  _", "_")]
 DEFAULT_FILE_FORMAT = "{Sender} {Attachment Name}"
 
 
@@ -262,15 +265,46 @@ def strip_reply_prefixes(subject):
             return remaining
 
 
-def extract_name(subject, separator=DEFAULT_NAME_SEPARATOR):
-    """The 'Name' part of a 'Name - Reference' subject (text before the separator).
-    The chosen separator is tried first, then ' - ' and ' || '."""
+def normalize_separators(separators):
+    """Enabled separators as a clean list: trimmed, no blanks or duplicates, longest first
+    (so '||' is tried before '|'). A single string is accepted for older callers."""
+    if isinstance(separators, str):
+        separators = [separators]
+    out = []
+    for sep in separators or []:
+        sep = s(sep).strip()
+        if sep and sep not in out:
+            out.append(sep)
+    return sorted(out, key=len, reverse=True)
+
+
+def extract_name(subject, separators=DEFAULT_SEPARATORS, reference=""):
+    """The Sender part of a 'Sender - Reference rest' subject.
+    Spaces around a separator are ignored. When the Reference is found in the subject,
+    the Sender is the text before it (so a hyphen inside the reference or the company name
+    is safe). Otherwise the Sender is the text before the first enabled separator."""
     remaining = strip_reply_prefixes(subject)
     if not remaining:
         return ""
-    for sep in [separator, " - ", " || "]:
-        if sep and sep in remaining:
-            return clean_filename(remaining[:remaining.find(sep)].strip())
+    seps = normalize_separators(separators)
+    ref = s(reference).strip()
+    idx = remaining.lower().find(ref.lower()) if ref else -1
+    if idx >= 0:
+        head = remaining[:idx]
+        trimmed = True
+        while trimmed:                      # drop trailing spaces and separators
+            trimmed = False
+            head = head.rstrip()
+            for sep in seps:
+                if head.endswith(sep):
+                    head = head[:-len(sep)]
+                    trimmed = True
+                    break
+        return clean_filename(head.strip())
+    if seps:
+        m = re.search("|".join(re.escape(sep) for sep in seps), remaining)
+        if m:
+            return clean_filename(remaining[:m.start()].strip())
     return clean_filename(remaining)
 
 
@@ -447,7 +481,8 @@ class Config:
         self.provider = _default_provider()
         self.imap = {"preset": "Gmail", "host": "imap.gmail.com", "port": 993,
                      "user": "", "security": "ssl"}
-        self.name_separator = DEFAULT_NAME_SEPARATOR
+        self.separators = list(DEFAULT_SEPARATORS)
+        self.custom_separator = ""
         self.file_format = DEFAULT_FILE_FORMAT
         self.custom_fields = list(DEFAULT_CUSTOM_FIELDS)
         self.custom_filter = {"direction": "Both", "only_reference": False,
@@ -465,7 +500,7 @@ class Config:
         self._load()
 
     _SIMPLE = ("db_path", "poll_seconds", "warn_days", "hint_regex", "hint_phrases", "toasts",
-               "scan_root", "theme", "provider", "imap", "name_separator", "file_format",
+               "scan_root", "theme", "provider", "imap", "separators", "custom_separator", "file_format",
                "custom_fields", "custom_filter", "scan_enabled", "require_scan", "macro_mode",
                "mark_web", "auto_monitor", "check_updates", "skipped_version", "update_snooze_until")
 
@@ -487,6 +522,17 @@ class Config:
                 else:
                     setattr(self, key, val)
         self.file_format = upgrade_format(self.file_format) or DEFAULT_FILE_FORMAT
+        if "separators" not in d and s(d.get("name_separator")).strip():   # settings of 2.0.x
+            old = s(d["name_separator"]).strip()
+            known = [v for _, v in SEPARATOR_CHOICES]
+            self.separators = [old] if old in known else list(DEFAULT_SEPARATORS)
+            self.custom_separator = "" if old in known else old
+        if not isinstance(self.separators, list):
+            self.separators = list(DEFAULT_SEPARATORS)
+        self.custom_separator = s(self.custom_separator)
+
+    def active_separators(self):
+        return normalize_separators(list(self.separators) + [self.custom_separator])
         self.poll_seconds = int(self.poll_seconds)
         self.warn_days = int(self.warn_days)
         if self.theme not in ("light", "dark"):
@@ -1224,7 +1270,7 @@ class EmailProcessor:
                     "SenderName": s(safe(lambda: item.SenderName)), "SenderEmail": sender_email,
                     "To": s(safe(lambda: item.To)), "Cc": s(safe(lambda: item.CC)),
                     "Subject": subject, "MailFolder": folder_name, "Reference": tender_ref,
-                    "Name": extract_name(subject, self.cfg.name_separator) if tender_ref else "",
+                    "Name": extract_name(subject, self.cfg.active_separators(), tender_ref) if tender_ref else "",
                     "AttachmentCount": len(names), "AttachmentNames": "; ".join(names)[:250],
                     "NewText": new_message_text(body).strip()[:500], "Result": result,
                     "LocalPath": local_path, "EmailId": entry_id})
@@ -1312,7 +1358,7 @@ class EmailProcessor:
             self.toast("Save failed", "Cannot use folder:\n%s" % local_path)
             return "Save Failed"
 
-        name = extract_name(subject, self.cfg.name_separator)
+        name = extract_name(subject, self.cfg.active_separators(), tender_ref)
         file_no = None
         saved, skipped_type, dup_count, allowed_seen = [], [], 0, 0
         threats, held, blocked, notes = [], [], [], []
@@ -2950,10 +2996,9 @@ class App(tb.Window):
 
     # ---------- page: subject rules ----------
     def _page_rules(self, page):
-        self.sep_var = tk.StringVar(value={" - ": "Dash ( - )", " || ": "Double bar ( || )"}.get(
-            self.cfg.name_separator, "Custom"))
-        self.sep_custom = tk.StringVar(value=self.cfg.name_separator
-                                       if self.cfg.name_separator not in (" - ", " || ") else "")
+        self.sep_vars = {val: tk.BooleanVar(value=val in self.cfg.separators)
+                         for _, val in SEPARATOR_CHOICES}
+        self.sep_custom = tk.StringVar(value=self.cfg.custom_separator)
         self.fmt_var = tk.StringVar(value=self.cfg.file_format)
         self.preview_var = tk.StringVar()
         self.excl_var = tk.StringVar()
@@ -2969,33 +3014,34 @@ class App(tb.Window):
         self._label(lay, "Example:  ABC Contracting - PRJ-001 Quotation     "
                          "(Sender = ABC Contracting, Reference = PRJ-001)",
                     role="muted", font=("Segoe UI", 9)).pack(anchor="w")
-        self._label(f, "Separator").grid(row=1, column=0, sticky="w", pady=5)
+        self._label(f, "Separators").grid(row=1, column=0, sticky="w", pady=5)
         sp = self.skin(tk.Frame(f), "bg")
         sp.grid(row=1, column=1, sticky="w")
-        cb = ttk.Combobox(sp, textvariable=self.sep_var, values=["Dash ( - )", "Double bar ( || )", "Custom"],
-                          state="readonly", width=18)
-        cb.pack(side="left")
-        ce = ttk.Entry(sp, textvariable=self.sep_custom, width=12)
-        ce.pack(side="left", padx=(8, 0))
-        self._hinted(ce, self.sep_custom, "custom separator")
-        self._label(f, "File name format").grid(row=2, column=0, sticky="w", pady=5)
+        for label, val in SEPARATOR_CHOICES:
+            ttk.Checkbutton(sp, text=label, variable=self.sep_vars[val],
+                            bootstyle="round-toggle").pack(side="left", padx=(0, 12))
+        self._label(f, "Custom separator").grid(row=2, column=0, sticky="w", pady=5)
+        ce = ttk.Entry(f, textvariable=self.sep_custom, width=14)
+        ce.grid(row=2, column=1, sticky="w")
+        self._hinted(ce, self.sep_custom, "optional, e.g. ##")
+        self._label(f, "File name format").grid(row=3, column=0, sticky="w", pady=5)
         e = ttk.Entry(f, textvariable=self.fmt_var)
-        e.grid(row=2, column=1, sticky="ew")
+        e.grid(row=3, column=1, sticky="ew")
         self._hinted(e, self.fmt_var, "Use {Sender} {Reference} {Date} {Attachment Name}, e.g. {Sender} {Attachment Name}")
-        self._label(f, "Preview").grid(row=3, column=0, sticky="w", pady=5)
-        self._label(f, "", font=FONT_BOLD, textvariable=self.preview_var).grid(row=3, column=1, sticky="w")
-        for v in (self.fmt_var, self.sep_var, self.sep_custom):
+        self._label(f, "Preview").grid(row=4, column=0, sticky="w", pady=5)
+        self._label(f, "", font=FONT_BOLD, textvariable=self.preview_var).grid(row=4, column=1, sticky="w")
+        for v in [self.fmt_var, self.sep_custom] + list(self.sep_vars.values()):
             v.trace_add("write", lambda *a: self._update_preview())
         ttk.Button(f, text="Save rules", command=self._save_rules, bootstyle="primary").grid(
-            row=4, column=0, sticky="w", pady=(10, 0))
+            row=5, column=0, sticky="w", pady=(10, 0))
         self._label(f, "How an email is judged, in this order:  1) its subject contains a Reference   "
                        "2) its subject contains none of the exclusion words below   3) the sender's new "
                        "text contains a Body Keyword   4) the attachments are scanned and saved, named by "
-                       "the format above. Sender = the text before the separator in the subject, Reference = the "
+                       "the format above. Sender = the text before the Reference in the subject (spaces and separators around it are ignored), Reference = the "
                        "matching reference, Date = the email date, Attachment Name = the attachment's "
                        "own file name (it comes from the attachment, not the subject). The extension "
                        "is always kept.", role="muted", font=("Segoe UI", 9),
-                    wraplength=860, justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+                    wraplength=860, justify="left").grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         card2, g = self._form_card(page)
         card2.pack(fill="x", pady=(0, 12))
@@ -3014,24 +3060,21 @@ class App(tb.Window):
         self.excl_table.pack(fill="both", expand=True)
         self._update_preview()
 
-    def _current_separator(self):
-        choice = self.sep_var.get()
-        if choice.startswith("Dash"):
-            return " - "
-        if choice.startswith("Double"):
-            return " || "
-        custom = self.sep_custom.get()
-        return custom if custom.strip() else " - "
+    def _chosen_separators(self):
+        chosen = [val for _, val in SEPARATOR_CHOICES if self.sep_vars[val].get()]
+        return chosen or list(DEFAULT_SEPARATORS)
 
     def _update_preview(self):
-        name = extract_name("RE: ABC Contracting%sPRJ-001 Quotation" % self._current_separator(),
-                            self._current_separator())
+        seps = normalize_separators(self._chosen_separators() + [self.sep_custom.get()])
+        mark = self.sep_custom.get().strip() or (self._chosen_separators()[0])
+        name = extract_name("RE: ABC Contracting %s PRJ-001 Quotation" % mark, seps, "PRJ-001")
         self.preview_var.set(build_file_name(self.fmt_var.get(), name, "PRJ-001", "2026-11-03",
                                              "Quotation.pdf"))
 
     def _save_rules(self):
         fmt = upgrade_format(self.fmt_var.get().strip()) or DEFAULT_FILE_FORMAT
-        self.cfg.name_separator = self._current_separator()
+        self.cfg.separators = self._chosen_separators()
+        self.cfg.custom_separator = self.sep_custom.get().strip()
         self.cfg.file_format = fmt
         self.cfg.save()
         self._log_line("Subject rules saved.")

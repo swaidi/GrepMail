@@ -10,7 +10,7 @@ Custom Log, Processing Log, Saved Files, Unmatched, Summary).
 3. The sender's new text contains a **Body Keyword**.
 4. Attachments are scanned, then saved using the **file name format** ({Sender}, {Reference}, {Date}, {Attachment Name}).
 
-Subject layout: `Name - Reference` (separator selectable). Per-reference search scope:
+Subject layout: `Sender - Reference rest of the subject`. The dash `-` is the default separator; others (`–`, `||`, `|`, `/`, `_` and one custom entry) can be switched on in Settings > Subject Rules, and spaces around a separator are ignored. Per-reference search scope:
 Subfolders only (default), Subfolders and Inbox, or Inbox only.
 
 ## Platforms
